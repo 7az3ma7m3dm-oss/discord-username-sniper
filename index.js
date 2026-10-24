@@ -2,7 +2,7 @@
 
 const { loadConfig, log, sleep } = require('./utils/utils');
 const { nameSequence, parsePatternList } = require('./utils/nameGenerator');
-const { askMode, askPatterns, closeMenus } = require('./utils/menu');
+const { askMode, askPatterns } = require('./utils/menu');
 const { classifyError, waitFor } = require('./utils/errorHandling');
 const { loadNames } = require('./utils/watchlist');
 const { checkAvailability } = require('./utils/availability');
@@ -16,10 +16,24 @@ const {
 } = require('./utils/apiService');
 
 const MODE_WORDS = ['hammer', 'watch', 'watchlist'];
+const PATTERN_TOKEN = /^\d{1,2}[lcn]$/i;
+
+/**
+ * Pull only real pattern tokens out of the CLI.
+ * Shell comments and stray words are dropped instead of crashing the parse.
+ */
+function cliPatterns() {
+  return process.argv
+    .slice(2)
+    .filter((a) => !a.startsWith('--'))
+    .flatMap((a) => String(a).split(/[,\s]+/))
+    .map((a) => a.trim())
+    .filter((a) => PATTERN_TOKEN.test(a));
+}
 
 /** Patterns from CLI first, then config, then legacy fallback. */
 function resolvePatterns(cfg) {
-  const fromCli = process.argv.slice(2).filter((a) => !a.startsWith('--') && !MODE_WORDS.includes(a.toLowerCase()));
+  const fromCli = cliPatterns();
   if (fromCli.length > 0) return parsePatternList(fromCli.join(' '));
 
   if (Array.isArray(cfg.namePatterns) && cfg.namePatterns.length > 0) {
@@ -47,7 +61,7 @@ async function pickMode(cfg) {
 /** Patterns for hammer mode, honouring CLI and config. */
 async function pickPatterns(cfg) {
   const args = process.argv.slice(2);
-  const hasCliPattern = args.some((a) => !a.startsWith('--') && !MODE_WORDS.includes(a.toLowerCase()));
+  const hasCliPattern = cliPatterns().length > 0;
 
   if (hasCliPattern) return resolvePatterns(cfg);
   if (args.includes('--no-menu') || cfg.menu === false) return resolvePatterns(cfg);
@@ -250,18 +264,10 @@ async function run() {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry');
 
-  let mode;
-  let patterns;
-  try {
-    mode = await pickMode(cfg);
-    if (!mode) {
-      log('menu closed, nothing to do.');
-      return 0;
-    }
-    if (mode === 'hammer') patterns = await pickPatterns(cfg);
-  } finally {
-    // Release stdin before any long run starts.
-    closeMenus();
+  const mode = await pickMode(cfg);
+  if (!mode) {
+    log('menu closed, nothing to do.');
+    return 0;
   }
 
   if (mode === 'watch') {
@@ -281,6 +287,7 @@ async function run() {
     return runWatch(cfg, list);
   }
 
+  const patterns = await pickPatterns(cfg);
   if (dryRun) {
     preview(patterns, null);
     return 0;
