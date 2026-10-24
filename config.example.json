@@ -1,0 +1,20 @@
+{
+  "webhookUrl": "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN",
+  "token": "YOUR_TOKEN_HERE",
+  "password": "YOUR_PASSWORD_HERE",
+  "mode": "scan",
+  "namePatterns": ["4l", "4c", "3c"],
+  "watchFile": "names.txt",
+  "availableFile": "available.txt",
+  "watchIntervalMs": 30000,
+  "maxRounds": 0,
+  "probeConcurrency": 8,
+  "batchDelayMs": 150,
+  "scanCount": 50,
+  "claimOnFree": false,
+  "saveResults": true,
+  "attemptDelayMs": 1100,
+  "maxAttempts": 0,
+  "stopOnSuccess": true,
+  "menu": true
+}

@@ -1,0 +1,41 @@
+
+  pick a mode
+  -----------
+  1. hammer   - random names, keeps guessing
+  2. watch    - specific names from a file
+  3. quit
+
+  choice:   not a valid choice, try again
+
+
+  pick a mode
+  -----------
+  1. hammer   - random names, keeps guessing
+  2. watch    - specific names from a file
+  3. quit
+
+  choice: 
+  pick a name shape
+  -----------------
+  1. 3 letters             (3L)
+  2. 3 chars, letters+dig (3C)
+  3. 4 letters             (4L)
+  4. 4 chars, letters+dig (4C)
+  5. 5 letters             (5L)
+  6. mixed cycle           4L -> 4C -> 3C
+  7. custom                type your own
+
+  choice:   not a valid choice, try again
+
+
+  pick a name shape
+  -----------------
+  1. 3 letters             (3L)
+  2. 3 chars, letters+dig (3C)
+  3. 4 letters             (4L)
+  4. 4 chars, letters+dig (4C)
+  5. 5 letters             (5L)
+  6. mixed cycle           4L -> 4C -> 3C
+  7. custom                type your own
+
+  choice: 

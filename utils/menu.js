@@ -2,6 +2,7 @@
 
 const readline = require('readline');
 const { parsePatternList } = require('./nameGenerator');
+const { colors } = require('./colors');
 
 /** Menu rows for the name shape. Order is the order shown. */
 const PATTERN_OPTIONS = [
@@ -10,17 +11,19 @@ const PATTERN_OPTIONS = [
   { key: '3', label: '4 letters             (4L)', patterns: ['4l'] },
   { key: '4', label: '4 chars, letters+dig (4C)', patterns: ['4c'] },
   { key: '5', label: '5 letters             (5L)', patterns: ['5l'] },
-  { key: '6', label: 'mixed cycle           4L -> 4C -> 3C', patterns: ['4l', '4c', '3c'] },
-  { key: '7', label: 'custom                type your own', custom: true },
+  { key: '6', label: '6 chars, letters+dig (6C)', patterns: ['6c'] },
+  { key: '7', label: 'mixed cycle           4L -> 4C -> 3C', patterns: ['4l', '4c', '3c'] },
+  { key: '8', label: 'custom                type your own', custom: true },
 ];
 
 /** Menu rows for the mode. */
 const MODE_OPTIONS = [
-  { key: '1', label: 'hammer   - random names, keeps guessing', mode: 'hammer' },
-  { key: '2', label: 'watch    - specific names from a file', mode: 'watch' },
+  { key: '1', label: 'scan', text: 'check names only, change nothing', mode: 'scan' },
+  { key: '2', label: 'hammer', text: 'random names, probe each one', mode: 'hammer' },
+  { key: '3', label: 'watch', text: 'file list, claim the moment one frees', mode: 'watch' },
 ];
 
-const QUIT = '3';
+const QUIT = '4';
 
 // One readline session for the whole menu flow. Closing and reopening
 // stdin between prompts loses buffered piped input.
@@ -32,8 +35,6 @@ function getSession() {
     const queue = [];
     let pending = null;
 
-    // Buffer every line. Piped input arrives before a question is asked,
-    // so a plain question() callback would lose the extra lines.
     rl.on('line', (line) => {
       if (pending) {
         const resolve = pending;
@@ -66,14 +67,11 @@ function closeMenus() {
   if (session) session.close();
 }
 
-/**
- * Turn a raw menu answer into a pattern list.
- * Returns null when the input is not usable so the caller can re-ask.
- */
+/** Turn a raw menu answer into a pattern list, or null. */
 function parseChoice(input, customValue) {
   const raw = String(input || '').trim().toLowerCase();
 
-  if (raw === '7') {
+  if (raw === '8') {
     if (!customValue) return null;
     try {
       return parsePatternList(customValue);
@@ -92,40 +90,60 @@ function parseModeChoice(input) {
   const raw = String(input || '').trim().toLowerCase();
   const row = MODE_OPTIONS.find((option) => option.key === raw);
   if (row) return row.mode;
-  if (raw === 'hammer') return 'hammer';
-  if (raw === 'watch' || raw === 'watchlist') return 'watch';
+  if (['scan', 'hammer', 'watch', 'watchlist'].includes(raw)) {
+    return raw === 'watchlist' ? 'watch' : raw;
+  }
   return null;
 }
 
+function box(lines) {
+  const width = Math.max(...lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, '').length)) + 2;
+  const top = `  ${colors.cyan('┌')}${colors.cyan('─'.repeat(width))}${colors.cyan('┐')}`;
+  const bottom = `  ${colors.cyan('└')}${colors.cyan('─'.repeat(width))}${colors.cyan('┘')}`;
+  const body = lines.map((line) => {
+    const plain = line.replace(/\x1b\[[0-9;]*m/g, '');
+    const pad = ' '.repeat(width - plain.length - 1);
+    return `  ${colors.cyan('│')} ${line}${pad}${colors.cyan('│')}`;
+  });
+  return [top, ...body, bottom].join('\n');
+}
+
 function renderModeMenu(stream) {
-  stream.write('\n  pick a mode\n');
-  stream.write('  -----------\n');
-  for (const option of MODE_OPTIONS) {
-    stream.write(`  ${option.key}. ${option.label}\n`);
-  }
-  stream.write(`  ${QUIT}. quit\n`);
-  stream.write('\n  choice: ');
+  const lines = [
+    `${colors.bold('username sniper')}  ${colors.gray('probe, hammer, watch')}`,
+    '',
+    ...MODE_OPTIONS.map(
+      (option) => `${colors.cyan(option.key)}  ${colors.bold(option.label.padEnd(7))} ${colors.gray(option.text)}`,
+    ),
+    `${colors.cyan(QUIT)}  ${colors.bold('quit')}`,
+  ];
+  stream.write(`\n${box(lines)}\n\n  choice: `);
 }
 
 function renderMenu(stream) {
-  stream.write('\n  pick a name shape\n');
-  stream.write('  -----------------\n');
-  for (const option of PATTERN_OPTIONS) {
-    stream.write(`  ${option.key}. ${option.label}\n`);
-  }
-  stream.write('\n  choice: ');
+  const lines = [
+    `${colors.bold('pick a name shape')}`,
+    '',
+    ...PATTERN_OPTIONS.map(
+      (option) => `${colors.cyan(option.key)}  ${option.label}  ${colors.gray(option.patterns || '')}`,
+    ),
+  ];
+  stream.write(`\n${box(lines)}\n\n  choice: `);
 }
 
-/** Ask for a mode. Resolves 'hammer', 'watch', or null when quit. */
+/** Ask for a mode. Resolves 'scan' | 'hammer' | 'watch' | null. */
 async function askMode() {
   const io = getSession();
   for (;;) {
     renderModeMenu(process.stdout);
     const answer = await io.ask('');
-    if (String(answer).trim().toLowerCase() === QUIT) return null;
+    if (String(answer).trim() === QUIT) return null;
     const mode = parseModeChoice(answer);
-    if (mode) return mode;
-    process.stdout.write('  not a valid choice, try again\n\n');
+    if (mode) {
+      process.stdout.write(`  ${colors.green('mode')} ${colors.bold(mode)}\n`);
+      return mode;
+    }
+    process.stdout.write(`  ${colors.red('not a valid choice')}\n`);
   }
 }
 
@@ -135,14 +153,14 @@ async function askPatterns() {
   for (;;) {
     renderMenu(process.stdout);
     const answer = await io.ask('');
-    const looksCustom = String(answer).trim().toLowerCase() === '7';
+    const looksCustom = String(answer).trim() === '8';
     const custom = looksCustom ? await io.ask('  type pattern (e.g. 2n 5c 4l): ') : null;
     const patterns = parseChoice(answer, custom);
     if (patterns) {
-      process.stdout.write(`  locked: ${patterns.map((p) => p.label).join(' -> ')}\n\n`);
+      process.stdout.write(`  ${colors.green('shape')} ${colors.bold(patterns.map((p) => p.label).join(' -> '))}\n\n`);
       return patterns;
     }
-    process.stdout.write('  not a valid choice, try again\n\n');
+    process.stdout.write(`  ${colors.red('not a valid choice')}\n`);
   }
 }
 

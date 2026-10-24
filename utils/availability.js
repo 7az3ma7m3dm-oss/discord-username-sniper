@@ -1,24 +1,21 @@
 'use strict';
 
 /**
- * Availability probe for a candidate username.
+ * Username availability probe.
  *
- * Tries the dedicated attempt endpoint first, which answers "is this taken"
- * without changing anything. Falls back to reporting "unknown" when the
- * endpoint is not offered, so the caller can decide to try a claim instead.
+ * The attempt endpoint answers "free or taken" without changing anything.
+ * It is the fast path: one request per name, no account changes.
  */
 
-const PROBE_PATHS = ['/users/@me/pomelo-attempt', '/unique-username/username-attempt'];
+const PROBE_PATHS = ['/users/@me/pomelo-attempt'];
 
 /**
- * Returns one of:
- *   { state: 'free' }              - safe to claim
- *   { state: 'taken' }             - someone has it
- *   { state: 'invalid' }           - server says the name is not allowed
- *   { state: 'unknown', reason }   - probe unsupported or inconclusive
+ * One probe, no retries.
+ * Returns { state, reason?, retryAfterMs? } where state is
+ * 'free' | 'taken' | 'invalid' | 'ratelimited' | 'unknown'.
  */
-async function checkAvailability(client, username) {
-  let lastReason = 'no probe answered';
+async function probeOnce(client, username) {
+  let lastReason = 'no probe path answered';
 
   for (const probePath of PROBE_PATHS) {
     let res;
@@ -29,37 +26,65 @@ async function checkAvailability(client, username) {
       continue;
     }
 
-    if (res.status === 404 || res.status === 405 || res.status === 400) {
-      lastReason = `probe ${probePath} answered ${res.status}`;
-      continue;
-    }
-
     if (res.status === 429) {
-      return { state: 'unknown', reason: 'probe rate limited', retryAfter: res.headers };
+      const header = res.headers || {};
+      const seconds = parseFloat(header['retry-after']);
+      return {
+        state: 'ratelimited',
+        reason: 'probe rate limited',
+        retryAfterMs: Number.isNaN(seconds) ? 5000 : Math.ceil(seconds * 1000),
+      };
     }
 
     if (res.status === 401 || res.status === 403) {
-      return { state: 'unknown', reason: `probe rejected the token (${res.status})` };
+      return { state: 'unknown', reason: `token rejected (${res.status})` };
+    }
+
+    if (res.status === 404 || res.status === 405) {
+      lastReason = `probe path missing (${res.status})`;
+      continue;
     }
 
     if (res.status >= 500) {
-      return { state: 'unknown', reason: `probe server error (${res.status})` };
+      return { state: 'unknown', reason: `server error (${res.status})` };
     }
 
-    if (res.status === 200 && res.data && typeof res.data.taken === 'boolean') {
-      return { state: res.data.taken ? 'taken' : 'free' };
+    const body = res.data || {};
+
+    if (res.status === 200 && typeof body.taken === 'boolean') {
+      return { state: body.taken ? 'taken' : 'free' };
     }
 
-    // Some responses carry the answer inside a message string.
-    const message = String((res.data && res.data.message) || '').toLowerCase();
+    const message = String(body.message || '').toLowerCase();
     if (message.includes('already taken')) return { state: 'taken' };
     if (message.includes('available')) return { state: 'free' };
-    if (message.includes('invalid')) return { state: 'invalid' };
 
-    lastReason = `probe ${probePath} answered ${res.status} with no verdict`;
+    // Discord puts per-field errors under body.errors when a name is malformed.
+    if (res.status === 400 && body.errors) {
+      return { state: 'invalid', reason: JSON.stringify(body.errors) };
+    }
+
+    lastReason = `probe answered ${res.status} with no verdict`;
   }
 
   return { state: 'unknown', reason: lastReason };
 }
 
-module.exports = { checkAvailability, PROBE_PATHS };
+/**
+ * Probe with a short retry on rate limits.
+ * retries default 2, so a single name costs at most three requests.
+ */
+async function checkAvailability(client, username, options = {}) {
+  const retries = Number.isInteger(options.retries) ? options.retries : 2;
+  const sleep = options.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+
+  let attempt = 0;
+  for (;;) {
+    const verdict = await probeOnce(client, username);
+    if (verdict.state !== 'ratelimited' || attempt >= retries) return verdict;
+    attempt += 1;
+    await sleep(verdict.retryAfterMs || 5000);
+  }
+}
+
+module.exports = { checkAvailability, probeOnce, PROBE_PATHS };

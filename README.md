@@ -4,26 +4,44 @@ The Discord Username Sniper is a script that generates usernames in a shape you 
 
 ## What it does
 
-- Two modes: **hammer** (random names) and **watch** (specific names from a file).
-- **Hammer** generates candidates from a pattern: length plus character set, then tries each one.
-- **Watch** probes a list of names with the availability endpoint, and claims the first one that frees up.
-- Sends `PATCH /api/v9/users/@me` with a candidate and the account password.
+- Three modes: **scan**, **hammer**, **watch**.
+- **scan** probes names and reports `AVAILABLE` in green or `taken` in red. It changes nothing.
+- **hammer** generates random names, probes each one, and can claim the free ones.
+- **watch** polls a file of targets and claims the first one that frees up.
+- Probes use the availability endpoint, which answers free/taken without touching the account.
+- Results are appended to `available.txt` so nothing is lost on screen.
 - Honors `429` rate limits exactly as the server states them.
-- Posts a webhook embed on a hit, on a fatal stop, or on an attempt ceiling.
+- Posts a webhook embed on a hit.
 
 ## Modes
 
 Run `node index.js` and pick from the menu:
 
 ```
-  pick a mode
-  -----------
-  1. hammer   - random names, keeps guessing
-  2. watch    - specific names from a file
-  3. quit
+  ┌──────────────────────────────────────────────────┐
+  │ username sniper  probe, hammer, watch            │
+  │                                                  │
+  │ 1  scan      check names only, change nothing    │
+  │ 2  hammer    random names, probe each one        │
+  │ 3  watch     file list, claim the moment one...  │
+  │ 4  quit                                          │
+  └──────────────────────────────────────────────────┘
 ```
 
-**hammer** then asks for a name shape from a second menu.
+Colored output:
+
+```
+   AVAILABLE  nmtxel        <- green
+   taken      oi            <- red
+   invalid    bad..name     <- blue
+```
+
+Every result is also written to `available.txt`:
+
+```
+2026-10-24T12:13:50.986Z AVAILABLE nmtxel
+2026-10-24T12:13:41.328Z taken     oi
+```
 
 **watch** reads `names.txt`, one target per line, `#` for comments:
 
@@ -33,7 +51,7 @@ kai
 nyx   # sleep token
 ```
 
-Each round it probes every target; when one reads as free it claims it immediately and pings the webhook.
+Each round it probes every target in parallel; when one reads free it claims it immediately.
 
 Pattern tokens:
 
@@ -98,11 +116,11 @@ Copy-Item config.example.json config.json
 
 ```bash
 npm start                    # menus, pick mode and shape
-node index.js hammer 3c      # random 3-char names, no menu
-node index.js hammer 4l,4c,3c
-node index.js watch          # watch names.txt
-node index.js watch --dry    # show the parsed target list
-node index.js --dry          # sample candidates / list targets
+node index.js scan           # probe names.txt, nothing changes
+node index.js scan 6c        # probe 50 generated 6-char names
+node index.js hammer 3c      # random 3-char, probe, no claim
+node index.js watch          # watch names.txt, claim when free
+node index.js --dry          # preview, no network
 node index.js --no-menu      # use config.json settings only
 ```
 
