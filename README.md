@@ -1,6 +1,6 @@
 # Discord Username Sniper
 
-Terminal tool that walks the Discord username endpoint with generated candidates, in the shape you pick from a menu, and reports hits to a Discord webhook.
+The Discord Username Sniper is a script that generates usernames in a shape you choose and updates a Discord username using the Discord API. It sends webhook notifications on a successful or failed snipe. The project is organized into multiple files for modularity and maintainability.
 
 ## What it does
 
