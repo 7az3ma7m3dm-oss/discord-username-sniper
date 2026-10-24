@@ -3,16 +3,68 @@
 const readline = require('readline');
 const { parsePatternList } = require('./nameGenerator');
 
-/** Menu rows. Order is the order shown on the bench. */
-const OPTIONS = [
-  { key: '1', label: '3 letters            (3L)', patterns: ['3l'] },
+/** Menu rows for the name shape. Order is the order shown. */
+const PATTERN_OPTIONS = [
+  { key: '1', label: '3 letters             (3L)', patterns: ['3l'] },
   { key: '2', label: '3 chars, letters+dig (3C)', patterns: ['3c'] },
-  { key: '3', label: '4 letters            (4L)', patterns: ['4l'] },
+  { key: '3', label: '4 letters             (4L)', patterns: ['4l'] },
   { key: '4', label: '4 chars, letters+dig (4C)', patterns: ['4c'] },
-  { key: '5', label: '5 letters            (5L)', patterns: ['5l'] },
-  { key: '6', label: 'mixed cycle          4L -> 4C -> 3C', patterns: ['4l', '4c', '3c'] },
-  { key: '7', label: 'custom               type your own', custom: true },
+  { key: '5', label: '5 letters             (5L)', patterns: ['5l'] },
+  { key: '6', label: 'mixed cycle           4L -> 4C -> 3C', patterns: ['4l', '4c', '3c'] },
+  { key: '7', label: 'custom                type your own', custom: true },
 ];
+
+/** Menu rows for the mode. */
+const MODE_OPTIONS = [
+  { key: '1', label: 'hammer   - random names, keeps guessing', mode: 'hammer' },
+  { key: '2', label: 'watch    - specific names from a file', mode: 'watch' },
+];
+
+const QUIT = '3';
+
+// One readline session for the whole menu flow. Closing and reopening
+// stdin between prompts loses buffered piped input.
+let session = null;
+
+function getSession() {
+  if (!session) {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const queue = [];
+    let pending = null;
+
+    // Buffer every line. Piped input arrives before a question is asked,
+    // so a plain question() callback would lose the extra lines.
+    rl.on('line', (line) => {
+      if (pending) {
+        const resolve = pending;
+        pending = null;
+        resolve(line);
+      } else {
+        queue.push(line);
+      }
+    });
+
+    session = {
+      ask: (text) => {
+        if (text) process.stdout.write(text);
+        if (queue.length > 0) return Promise.resolve(queue.shift());
+        return new Promise((resolve) => {
+          pending = resolve;
+        });
+      },
+      close: () => {
+        rl.close();
+        session = null;
+      },
+    };
+  }
+  return session;
+}
+
+/** Close the shared menu session. Safe to call twice. */
+function closeMenus() {
+  if (session) session.close();
+}
 
 /**
  * Turn a raw menu answer into a pattern list.
@@ -30,49 +82,78 @@ function parseChoice(input, customValue) {
     }
   }
 
-  const row = OPTIONS.find((option) => option.key === raw);
+  const row = PATTERN_OPTIONS.find((option) => option.key === raw);
   if (!row || row.custom) return null;
   return parsePatternList(row.patterns.join(' '));
+}
+
+/** Turn a raw answer into a mode, or null. */
+function parseModeChoice(input) {
+  const raw = String(input || '').trim().toLowerCase();
+  const row = MODE_OPTIONS.find((option) => option.key === raw);
+  if (row) return row.mode;
+  if (raw === 'hammer') return 'hammer';
+  if (raw === 'watch' || raw === 'watchlist') return 'watch';
+  return null;
+}
+
+function renderModeMenu(stream) {
+  stream.write('\n  pick a mode\n');
+  stream.write('  -----------\n');
+  for (const option of MODE_OPTIONS) {
+    stream.write(`  ${option.key}. ${option.label}\n`);
+  }
+  stream.write(`  ${QUIT}. quit\n`);
+  stream.write('\n  choice: ');
 }
 
 function renderMenu(stream) {
   stream.write('\n  pick a name shape\n');
   stream.write('  -----------------\n');
-  for (const option of OPTIONS) {
+  for (const option of PATTERN_OPTIONS) {
     stream.write(`  ${option.key}. ${option.label}\n`);
   }
   stream.write('\n  choice: ');
 }
 
-/**
- * Ask the operator for a pattern list. Loops until a valid answer lands.
- */
-function askPatterns() {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-
-  const question = (text) =>
-    new Promise((resolve) => {
-      rl.question(text, (answer) => resolve(answer));
-    });
-
-  return (async () => {
-    try {
-      for (;;) {
-        renderMenu(process.stdout);
-        const answer = await question('');
-        const looksCustom = String(answer).trim().toLowerCase() === '7';
-        const custom = looksCustom ? await question('  type pattern (e.g. 2n 5c 4l): ') : null;
-        const patterns = parseChoice(answer, custom);
-        if (patterns) {
-          process.stdout.write(`  locked: ${patterns.map((p) => p.label).join(' -> ')}\n\n`);
-          return patterns;
-        }
-        process.stdout.write('  not a valid choice, try again\n\n');
-      }
-    } finally {
-      rl.close();
-    }
-  })();
+/** Ask for a mode. Resolves 'hammer', 'watch', or null when quit. */
+async function askMode() {
+  const io = getSession();
+  for (;;) {
+    renderModeMenu(process.stdout);
+    const answer = await io.ask('');
+    if (String(answer).trim().toLowerCase() === QUIT) return null;
+    const mode = parseModeChoice(answer);
+    if (mode) return mode;
+    process.stdout.write('  not a valid choice, try again\n\n');
+  }
 }
 
-module.exports = { OPTIONS, parseChoice, renderMenu, askPatterns };
+/** Ask for a pattern list. Loops until a valid answer lands. */
+async function askPatterns() {
+  const io = getSession();
+  for (;;) {
+    renderMenu(process.stdout);
+    const answer = await io.ask('');
+    const looksCustom = String(answer).trim().toLowerCase() === '7';
+    const custom = looksCustom ? await io.ask('  type pattern (e.g. 2n 5c 4l): ') : null;
+    const patterns = parseChoice(answer, custom);
+    if (patterns) {
+      process.stdout.write(`  locked: ${patterns.map((p) => p.label).join(' -> ')}\n\n`);
+      return patterns;
+    }
+    process.stdout.write('  not a valid choice, try again\n\n');
+  }
+}
+
+module.exports = {
+  PATTERN_OPTIONS,
+  MODE_OPTIONS,
+  parseChoice,
+  parseModeChoice,
+  renderMenu,
+  renderModeMenu,
+  askMode,
+  askPatterns,
+  closeMenus,
+};

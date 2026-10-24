@@ -4,10 +4,36 @@ The Discord Username Sniper is a script that generates usernames in a shape you 
 
 ## What it does
 
-- Generates candidates from a pattern: length plus character set.
+- Two modes: **hammer** (random names) and **watch** (specific names from a file).
+- **Hammer** generates candidates from a pattern: length plus character set, then tries each one.
+- **Watch** probes a list of names with the availability endpoint, and claims the first one that frees up.
 - Sends `PATCH /api/v9/users/@me` with a candidate and the account password.
 - Honors `429` rate limits exactly as the server states them.
 - Posts a webhook embed on a hit, on a fatal stop, or on an attempt ceiling.
+
+## Modes
+
+Run `node index.js` and pick from the menu:
+
+```
+  pick a mode
+  -----------
+  1. hammer   - random names, keeps guessing
+  2. watch    - specific names from a file
+  3. quit
+```
+
+**hammer** then asks for a name shape from a second menu.
+
+**watch** reads `names.txt`, one target per line, `#` for comments:
+
+```
+oi
+kai
+nyx   # sleep token
+```
+
+Each round it probes every target; when one reads as free it claims it immediately and pings the webhook.
 
 Pattern tokens:
 
@@ -43,7 +69,11 @@ Copy-Item config.example.json config.json
   "webhookUrl": "https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN",
   "token": "YOUR_ACCOUNT_TOKEN",
   "password": "YOUR_ACCOUNT_PASSWORD",
+  "mode": "hammer",
   "namePatterns": ["4l", "4c", "3c"],
+  "watchFile": "names.txt",
+  "watchIntervalMs": 30000,
+  "maxRounds": 0,
   "attemptDelayMs": 1100,
   "maxAttempts": 0,
   "stopOnSuccess": true,
@@ -54,20 +84,26 @@ Copy-Item config.example.json config.json
 - `webhookUrl` — optional, notifications are skipped when absent.
 - `token` — Discord account token. Sent as the `Authorization` header.
 - `password` — account password. The username endpoint requires it.
-- `namePatterns` — default pattern set when the menu is skipped.
+- `mode` — `hammer` or `watch` when the menu is skipped.
+- `namePatterns` — default pattern set for hammer mode.
+- `watchFile` — path to the watch list.
+- `watchIntervalMs` — pause between watch rounds, in milliseconds.
+- `maxRounds` — `0` means watch forever.
 - `attemptDelayMs` — pause between attempts, in milliseconds.
-- `maxAttempts` — `0` means run until a hit or a stop.
+- `maxAttempts` — `0` means hammer until a hit or a stop.
 - `stopOnSuccess` — exit after a successful change.
-- `menu` — show the pattern menu when run without arguments.
+- `menu` — show the menus when run without arguments.
 
 ## Run
 
 ```bash
-npm start               # menu, pick a shape
-node index.js 3c        # direct, no menu
-node index.js 4l,4c,3c  # cycle patterns in order
-node index.js --dry     # print sample candidates, touch nothing
-node index.js --no-menu # use config.json patterns, no prompt
+npm start                    # menus, pick mode and shape
+node index.js hammer 3c      # random 3-char names, no menu
+node index.js hammer 4l,4c,3c
+node index.js watch          # watch names.txt
+node index.js watch --dry    # show the parsed target list
+node index.js --dry          # sample candidates / list targets
+node index.js --no-menu      # use config.json settings only
 ```
 
 ## Exit codes

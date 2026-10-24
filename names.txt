@@ -1,0 +1,7 @@
+# watch list - one username per line, # starts a comment
+# these get polled and claimed the moment one frees up
+
+# examples - replace with your real targets
+oi
+kai
+nyx

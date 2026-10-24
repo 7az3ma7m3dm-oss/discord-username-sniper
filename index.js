@@ -2,8 +2,10 @@
 
 const { loadConfig, log, sleep } = require('./utils/utils');
 const { nameSequence, parsePatternList } = require('./utils/nameGenerator');
-const { askPatterns } = require('./utils/menu');
+const { askMode, askPatterns, closeMenus } = require('./utils/menu');
 const { classifyError, waitFor } = require('./utils/errorHandling');
+const { loadNames } = require('./utils/watchlist');
+const { checkAvailability } = require('./utils/availability');
 const {
   buildClient,
   updateUsername,
@@ -13,9 +15,11 @@ const {
   fetchSelf,
 } = require('./utils/apiService');
 
-/** Work out which patterns to run, from CLI first, then config. */
+const MODE_WORDS = ['hammer', 'watch', 'watchlist'];
+
+/** Patterns from CLI first, then config, then legacy fallback. */
 function resolvePatterns(cfg) {
-  const fromCli = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+  const fromCli = process.argv.slice(2).filter((a) => !a.startsWith('--') && !MODE_WORDS.includes(a.toLowerCase()));
   if (fromCli.length > 0) return parsePatternList(fromCli.join(' '));
 
   if (Array.isArray(cfg.namePatterns) && cfg.namePatterns.length > 0) {
@@ -24,37 +28,50 @@ function resolvePatterns(cfg) {
 
   if (cfg.namePattern) return parsePatternList(cfg.namePattern);
 
-  // Legacy fallback: nameLength + useLettersOnly
   return parsePatternList([`${cfg.nameLength}${cfg.useLettersOnly ? 'l' : 'c'}`]);
 }
 
-/** Decide patterns: CLI arg > menu (when run bare) > config. */
+/** Mode from CLI, config, or menu. */
+async function pickMode(cfg) {
+  const args = process.argv.slice(2);
+  const fromCli = args.find((a) => MODE_WORDS.includes(a.toLowerCase()));
+  if (fromCli) return fromCli.toLowerCase() === 'hammer' ? 'hammer' : 'watch';
+
+  if (args.includes('--no-menu') || cfg.menu === false) {
+    return cfg.mode === 'watch' ? 'watch' : 'hammer';
+  }
+
+  return askMode();
+}
+
+/** Patterns for hammer mode, honouring CLI and config. */
 async function pickPatterns(cfg) {
   const args = process.argv.slice(2);
-  const hasCliPattern = args.some((a) => !a.startsWith('--'));
-  const noMenu = args.includes('--no-menu');
+  const hasCliPattern = args.some((a) => !a.startsWith('--') && !MODE_WORDS.includes(a.toLowerCase()));
 
   if (hasCliPattern) return resolvePatterns(cfg);
-  if (noMenu || cfg.menu === false) return resolvePatterns(cfg);
+  if (args.includes('--no-menu') || cfg.menu === false) return resolvePatterns(cfg);
   return askPatterns();
 }
 
-async function run() {
-  const cfg = loadConfig();
-  const args = process.argv.slice(2);
-  const dryRun = args.includes('--dry');
-  const patterns = await pickPatterns(cfg);
-
-  if (dryRun) {
-    const names = nameSequence(patterns);
-    log(`dry run - patterns: ${patterns.map((p) => p.label).join(' -> ')}`);
-    for (let i = 0; i < 8; i += 1) {
-      const sample = names.next().value;
-      log(`sample ${i + 1}: ${sample.name} [${sample.pattern}]`);
-    }
-    return 0;
+/** Sample preview, no network. */
+function preview(patterns, names) {
+  if (names) {
+    log(`dry run - watch list: ${names.accepted.length} usable name(s)`);
+    names.accepted.forEach((name, index) => log(`target ${index + 1}: ${name}`));
+    names.rejected.forEach((entry) => log(`skipped "${entry.name}": ${entry.why}`));
+    return;
   }
+  const sequence = nameSequence(patterns);
+  log(`dry run - patterns: ${patterns.map((p) => p.label).join(' -> ')}`);
+  for (let i = 0; i < 8; i += 1) {
+    const sample = sequence.next().value;
+    log(`sample ${i + 1}: ${sample.name} [${sample.pattern}]`);
+  }
+}
 
+/** Random-name run. */
+async function runHammer(cfg, patterns) {
   const client = buildClient(cfg.token);
   const startedAt = Date.now();
 
@@ -67,12 +84,10 @@ async function run() {
   const accountTag = self.discriminator && self.discriminator !== '0'
     ? `${self.username}#${self.discriminator}`
     : self.username;
-  log(`account: ${accountTag} (${self.id})`);
-  log(`current username: ${self.username}`);
+  log(`mode: hammer | account: ${accountTag} (${self.id})`);
   log(`patterns: ${patterns.map((p) => p.label).join(' -> ')}`);
 
   const names = nameSequence(patterns);
-
   let attempts = 0;
   let lastCandidate = null;
   let lastPattern = null;
@@ -111,14 +126,9 @@ async function run() {
 
     if (result.ok) {
       const elapsed = Date.now() - startedAt;
-      log(
-        `HIT: username set to "${result.username}" (${patternLabel}) after ${attempts} attempt(s) in ${(elapsed / 1000).toFixed(1)}s`,
-      );
+      log(`HIT: "${result.username}" [${patternLabel}] after ${attempts} attempt(s) in ${(elapsed / 1000).toFixed(1)}s`);
       await notify(cfg.webhookUrl, successEmbed(result.username, accountTag, attempts, elapsed, patternLabel));
-      if (cfg.stopOnSuccess) return 0;
-      sameCandidateRetries = 0;
-      await sleep(cfg.attemptDelayMs);
-      continue;
+      return 0;
     }
 
     const synthetic = { response: { status: result.status, headers: result.headers, data: result.body } };
@@ -127,10 +137,7 @@ async function run() {
     if (plan.action === 'fatal') {
       log(`stopped: ${plan.reason} (http ${result.status})`);
       const bodyMsg = result.body && result.body.message ? ` - ${result.body.message}` : '';
-      await notify(
-        cfg.webhookUrl,
-        failureEmbed(`${plan.reason} (http ${result.status})${bodyMsg}`, attempts, candidate),
-      );
+      await notify(cfg.webhookUrl, failureEmbed(`${plan.reason} (http ${result.status})${bodyMsg}`, attempts, candidate));
       return 3;
     }
 
@@ -147,6 +154,140 @@ async function run() {
   }
 }
 
+/**
+ * Watch-list run. Polls each target, claims the first one that frees up.
+ */
+async function runWatch(cfg, list) {
+  const client = buildClient(cfg.token);
+  const startedAt = Date.now();
+
+  const self = await fetchSelf(client);
+  if (!self) {
+    log('could not read account: token or network problem. stopping.');
+    return 1;
+  }
+
+  const accountTag = self.discriminator && self.discriminator !== '0'
+    ? `${self.username}#${self.discriminator}`
+    : self.username;
+  log(`mode: watch | account: ${accountTag} (${self.id})`);
+  log(`targets: ${list.accepted.length} | interval: ${cfg.watchIntervalMs}ms`);
+
+  let round = 0;
+  let probes = 0;
+  let claims = 0;
+
+  for (;;) {
+    round += 1;
+    log(`round ${round}`);
+
+    for (const name of list.accepted) {
+      probes += 1;
+      const verdict = await checkAvailability(client, name);
+
+      if (verdict.state === 'taken') {
+        log(`  ${name}: taken`);
+        continue;
+      }
+
+      if (verdict.state === 'invalid') {
+        log(`  ${name}: not allowed by the server, skipping`);
+        continue;
+      }
+
+      if (verdict.state === 'unknown') {
+        log(`  ${name}: probe inconclusive (${verdict.reason}), trying a claim anyway`);
+      } else {
+        log(`  ${name}: FREE, claiming`);
+      }
+
+      // Free, or the probe could not answer - take the shot.
+      claims += 1;
+      let result;
+      try {
+        result = await updateUsername(client, name, cfg.password);
+      } catch (err) {
+        const plan = classifyError(err);
+        log(`  claim error on "${name}": ${plan.reason}`);
+        await waitFor(plan.delayMs || cfg.attemptDelayMs);
+        continue;
+      }
+
+      if (result.ok) {
+        const elapsed = Date.now() - startedAt;
+        log(`HIT: "${result.username}" claimed after ${claims} claim(s) in ${(elapsed / 1000).toFixed(1)}s`);
+        await notify(cfg.webhookUrl, successEmbed(result.username, accountTag, claims, elapsed, 'watch'));
+        return 0;
+      }
+
+      const synthetic = { response: { status: result.status, headers: result.headers, data: result.body } };
+      const plan = classifyError(synthetic);
+
+      if (plan.action === 'fatal') {
+        log(`stopped: ${plan.reason} (http ${result.status})`);
+        const bodyMsg = result.body && result.body.message ? ` - ${result.body.message}` : '';
+        await notify(cfg.webhookUrl, failureEmbed(`${plan.reason} (http ${result.status})${bodyMsg}`, claims, name));
+        return 3;
+      }
+
+      log(`  claim missed on "${name}" (http ${result.status} ${plan.reason})`);
+      await waitFor(plan.delayMs || cfg.attemptDelayMs);
+    }
+
+    if (cfg.maxRounds > 0 && round >= cfg.maxRounds) {
+      log(`round ceiling reached (${cfg.maxRounds}). ${probes} probe(s), ${claims} claim(s). stopping.`);
+      await notify(cfg.webhookUrl, failureEmbed(`Round ceiling reached after ${probes} probe(s).`, claims, null));
+      return 2;
+    }
+
+    log(`round ${round} done, sleeping ${cfg.watchIntervalMs}ms`);
+    await sleep(cfg.watchIntervalMs);
+  }
+}
+
+async function run() {
+  const cfg = loadConfig();
+  const args = process.argv.slice(2);
+  const dryRun = args.includes('--dry');
+
+  let mode;
+  let patterns;
+  try {
+    mode = await pickMode(cfg);
+    if (!mode) {
+      log('menu closed, nothing to do.');
+      return 0;
+    }
+    if (mode === 'hammer') patterns = await pickPatterns(cfg);
+  } finally {
+    // Release stdin before any long run starts.
+    closeMenus();
+  }
+
+  if (mode === 'watch') {
+    const list = loadNames(cfg.watchFile);
+    log(`watch list: ${list.path} (${list.accepted.length} usable)`);
+    if (list.rejected.length > 0) {
+      list.rejected.forEach((entry) => log(`skipped "${entry.name}": ${entry.why}`));
+    }
+    if (list.accepted.length === 0) {
+      log('watch list has no usable names. stopping.');
+      return 4;
+    }
+    if (dryRun) {
+      preview(null, list);
+      return 0;
+    }
+    return runWatch(cfg, list);
+  }
+
+  if (dryRun) {
+    preview(patterns, null);
+    return 0;
+  }
+  return runHammer(cfg, patterns);
+}
+
 if (require.main === module) {
   run()
     .then((code) => process.exit(code))
@@ -156,4 +297,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { run, resolvePatterns, pickPatterns };
+module.exports = { run, resolvePatterns, pickMode, pickPatterns };
